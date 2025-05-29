@@ -1,0 +1,22 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata: { name: ratings }
+spec:
+  host: ratings
+  subsets:
+  - name: v1
+    labels: { version: v1 }
+  - name: v2
+    labels: { version: v2 }
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata: { name: ratings-route }
+spec:
+  hosts: ["ratings"]                # callers still use http://ratings:9080
+  http:
+  - route:
+    - destination: { host: ratings, subset: v1 }
+      weight: 100                   # start: 100 % to v1
+    - destination: { host: ratings, subset: v2 }
+      weight: 0

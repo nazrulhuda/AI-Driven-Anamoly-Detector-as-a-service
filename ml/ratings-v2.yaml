@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratings-v2
+  labels: { app: ratings, version: v2 }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: ratings, version: v2 }
+  template:
+    metadata:
+      labels: { app: ratings, version: v2 }
+    spec:
+      serviceAccountName: bookinfo-ratings        # same SA as v1
+      containers:
+      - name: ratings
+        image: hudabhai/ratings-v2:4    # <-- use your pushed tag
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 9080 }]
+---
+# Direct ClusterIP (handy for manual tests)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratings-v2
+spec:
+  selector: { app: ratings, version: v2 }
+  ports: [{ port: 9080, name: http }]

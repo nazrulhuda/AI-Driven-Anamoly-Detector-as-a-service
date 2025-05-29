@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ddos-detector
+  labels:
+    app: ddos-detector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ddos-detector
+  template:
+    metadata:
+      labels:
+        app: ddos-detector
+      annotations:
+        sidecar.istio.io/inject: "false"  # Disable Istio sidecar injection
+    spec:
+      serviceAccountName: ddos-detector-sa
+      containers:
+        - name: ddos-detector
+          image: hudabhai/ddos-detector:latest66  # Update with your image
+          imagePullPolicy: Always
+          env:
+            - name: NAMESPACE
+              value: "default"  # Adjust as needed
+            - name: POD_NAME
+              value: "details-v1-54ffdd5947-vvm48,productpage-v1-d49bb79b4-ds6gt,ratings-v1-856f65bcff-xb6kr,reviews-v1-848b8749df-6cw47,reviews-v2-5fdf9886c7-m4rjm,reviews-v3-bb6b8ddc7-v5rjh"  
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      restartPolicy: Always
+

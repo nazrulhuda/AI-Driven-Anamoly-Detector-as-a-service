@@ -1,0 +1,30 @@
+# report-receiver-rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: report-receiver-sa
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: report-receiver-role
+rules:
+- apiGroups: ["networking.istio.io"]      # allow VS patch
+  resources: ["virtualservices"]
+  verbs: ["get","patch"]
+- apiGroups: ["apps"]                     # allow scale
+  resources: ["deployments/scale"]
+  verbs: ["get","patch"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: report-receiver-rb
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: report-receiver-role
+subjects:
+- kind: ServiceAccount
+  name: report-receiver-sa
+

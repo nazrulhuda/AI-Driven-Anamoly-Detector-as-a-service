@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: report-receiver
+  labels: { app: report-receiver }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: report-receiver }
+  template:
+    metadata:
+      labels: { app: report-receiver }
+    spec:
+      serviceAccountName: report-receiver-sa    # <-- NEW
+      containers:
+      - name: report-receiver
+        image: hudabhai/report_receiver:latest17
+        ports:
+        - containerPort: 8000
+        volumeMounts:
+        - name: reports-volume
+          mountPath: /reports
+      volumes:
+      - name: reports-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: report-receiver
+  labels: { app: report-receiver }
+spec:
+  selector: { app: report-receiver }
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+
