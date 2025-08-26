@@ -19,7 +19,7 @@ spec:
       serviceAccountName: ddos-detector-sa
       containers:
         - name: ddos-detector
-          image: hudabhai/ddos-detector:latest66  # Update with your image
+          image: hudabhai/ddos-detector:latest71  # Update with your image
           imagePullPolicy: Always
           env:
             - name: NAMESPACE

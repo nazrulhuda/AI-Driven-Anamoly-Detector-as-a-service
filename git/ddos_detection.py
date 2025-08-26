@@ -20,45 +20,63 @@ from lime.lime_tabular import LimeTabularExplainer
 # Pod name mapping with the new pod names
 ##############################################################################
 POD_SHORT_NAMES = {
-    'details-v1-54ffdd5947-vvm48': 'details',
+    'details-v1-54ffdd5947-vvm48':  'details',
     'productpage-v1-d49bb79b4-ds6gt': 'product',
-    'ratings-v1-856f65bcff-xb6kr': 'ratings',
-    'reviews-v1-848b8749df-6cw47': 'reviews1',
-    'reviews-v2-5fdf9886c7-m4rjm': 'reviews2',
-    'reviews-v3-bb6b8ddc7-v5rjh': 'reviews3'
+    # map *both* v1 and v2 hashes to the SAME short-name -> 'ratings'
+    'ratings-v1-856f65bcff-xb6kr':   'ratings',
+    'ratings-v2-569478494c-f8nt6':   'ratings',          #  <<< NEW
+    'reviews-v1-848b8749df-6cw47':   'reviews1',
+    'reviews-v2-5fdf9886c7-m4rjm':   'reviews2',
+    'reviews-v3-bb6b8ddc7-v5rjh':    'reviews3'
 }
 
 ##############################################################################
 # 1) Collect Logs
 ##############################################################################
-def collect_logs(namespace, pod_name, log_file):
-    logging.info(f"[{pod_name}] Collecting logs from pod {pod_name} in namespace {namespace}")
+def collect_logs(namespace, pod_name, log_file, fallback=None):
+    """
+    Try to fetch the last 60 s of Istio-proxy logs from `pod_name`.
+    If the API returns 404 and a `fallback` pod name is supplied,
+    retry exactly once with that fallback.
+    Returns True on success, False on any failure.
+    """
+    logging.info(f"[{pod_name}] Collecting logs …")
     try:
-        config.load_incluster_config()
-        logging.debug("In-cluster Kubernetes config loaded")
-    except config.ConfigException:
-        logging.info("In-cluster config not found; loading local kube config")
-        config.load_kube_config()
+        # load kube config only once per container lifetime
+        try:
+            config.load_incluster_config()
+        except config.ConfigException:
+            config.load_kube_config()
 
-    v1 = client.CoreV1Api()
-    open(log_file, 'w').close()  # empty the file
+        v1 = client.CoreV1Api()
 
-    try:
+        # empty / create the file
+        open(log_file, "w").close()
+
         logs = v1.read_namespaced_pod_log(
             name=pod_name,
             namespace=namespace,
-            container='istio-proxy',
-            since_seconds=60,  # last 60 seconds
-            timestamps=True
+            container="istio-proxy",
+            since_seconds=60,
+            timestamps=True,
         )
-        logging.debug(f"[{pod_name}] Raw logs:\n{logs[:500]}")
-        with open(log_file, 'a') as f:
+
+        with open(log_file, "a") as f:
             f.write(logs)
-        logging.info(f"[{pod_name}] Collected logs from pod {pod_name}")
+
+        logging.info(f"[{pod_name}] ✅ collected {len(logs.splitlines())} lines")
+        return True
+
     except client.exceptions.ApiException as e:
-        logging.exception(f"[{pod_name}] APIException collecting logs from {pod_name}: {e}")
-    except Exception as e:
-        logging.exception(f"[{pod_name}] Exception collecting logs from {pod_name}: {e}")
+        if e.status == 404 and fallback:
+            logging.warning(f"[{pod_name}] 404 not found – falling back to {fallback}")
+            return collect_logs(namespace, fallback, log_file)  # single retry
+        logging.exception(f"[{pod_name}] log-collection failed")
+        return False
+
+    except Exception as exc:
+        logging.exception(f"[{pod_name}] Unexpected error: {exc}")
+        return False
 
 ##############################################################################
 # 2) Extract Features
@@ -321,83 +339,91 @@ def post_report_to_receiver(file_path, receiver_url):
 ##############################################################################
 # 6) Main loop
 ##############################################################################
+##############################################################################
+# 6) Main loop  – v1-with-fallback-to-v2
+##############################################################################
 def main():
-    NAMESPACE = os.getenv('NAMESPACE', 'default')
-    
-    # Original pod list with fallback for ratings-v1
+    NAMESPACE = os.getenv("NAMESPACE", "default")
+
+    # Primary list (watch both v1 and v2 – if v1 restarts later we’ll see it)
     POD_NAMES = [
-        'details-v1-54ffdd5947-vvm48',
-        'productpage-v1-d49bb79b4-ds6gt',
-        'ratings-v1-856f65bcff-xb6kr',
-        'reviews-v1-848b8749df-6cw47',
-        'reviews-v2-5fdf9886c7-m4rjm',
-        'reviews-v3-bb6b8ddc7-v5rjh'
+        "details-v1-54ffdd5947-vvm48",
+        "productpage-v1-d49bb79b4-ds6gt",
+        "ratings-v1-856f65bcff-xb6kr",          # v1 first
+        "ratings-v2-569478494c-f8nt6",          # v2 also listed
+        "reviews-v1-848b8749df-6cw47",
+        "reviews-v2-5fdf9886c7-m4rjm",
+        "reviews-v3-bb6b8ddc7-v5rjh",
     ]
-    
-    # Define fallback mapping
-    fallback_pods = {
-        'ratings-v1-856f65bcff-xb6kr': 'ratings-v2-569478494c-f8nt6'
+
+    # Map any pod that disappears → its fallback pod
+    FALLBACK = {
+        "ratings-v1-856f65bcff-xb6kr": "ratings-v2-569478494c-f8nt6",
     }
 
-    MODEL_PATH = 'ddos_detection_model.pkl'
-    RECEIVER_URL = os.getenv('RECEIVER_URL', 'http://report-receiver.default.svc.cluster.local:8000/upload')
+    MODEL_PATH   = "ddos_detection_model.pkl"
+    RECEIVER_URL = os.getenv(
+        "RECEIVER_URL",
+        "http://report-receiver.default.svc.cluster.local:8000/upload"
+    )
 
     while True:
         try:
             global_ddos_rows = []
 
-            for pod_name in POD_NAMES:
-                try:
-                    LOG_FILE = f'/tmp/access_logs_{pod_name}.txt'
-                    logging.info(f"[{pod_name}] Starting DDoS detection cycle")
+            # ── iterate over every target pod ──────────────────────────────
+            for original_name in POD_NAMES:
+                pod_name  = original_name           # may change after fallback
+                log_file  = f"/tmp/access_logs_{pod_name}.txt"
+                logging.info(f"[{pod_name}] Starting DDoS detection cycle")
 
-                    # Try collecting logs
-                    collect_logs(NAMESPACE, pod_name, LOG_FILE)
-                except client.exceptions.ApiException as e:
-                    # If PodNotFound and fallback exists
-                    if e.status == 404 and pod_name in fallback_pods:
-                        fallback = fallback_pods[pod_name]
-                        logging.warning(f"[{pod_name}] not found. Falling back to {fallback}")
-                        pod_name = fallback
-                        LOG_FILE = f'/tmp/access_logs_{pod_name}.txt'
-                        collect_logs(NAMESPACE, pod_name, LOG_FILE)
-                    else:
-                        logging.error(f"Skipping pod {pod_name} due to error: {e}")
-                        continue
+                # ── collect logs (with one-time fallback) ─────────────────
+                ok = collect_logs(
+                    NAMESPACE,
+                    pod_name,
+                    log_file,
+                    fallback=FALLBACK.get(original_name)    # None if no fallback
+                )
+                if not ok:
+                    continue        # skip entire pod on failure
 
-                if os.path.exists(LOG_FILE):
-                    size_bytes = os.path.getsize(LOG_FILE)
-                    logging.info(f"[{pod_name}] Log file size: {size_bytes} bytes")
-                else:
-                    logging.warning(f"[{pod_name}] No log file found, skipping.")
+                # ── feature extraction ───────────────────────────────────
+                if not os.path.exists(log_file):
+                    logging.warning(f"[{pod_name}] No log file, skipping.")
                     continue
 
-                features_df = extract_features(LOG_FILE, pod_name)
-                if features_df is not None and not features_df.empty:
-                    logging.info(f"[{pod_name}] Extracted features: {features_df.shape[0]} records")
+                features_df = extract_features(log_file, pod_name)
+                if features_df is None or features_df.empty:
+                    logging.info(f"[{pod_name}] No features extracted.")
+                    continue
 
-                    results_df, ddos_rows_for_model = predict_ddos(features_df, MODEL_PATH, pod_name)
-                    if not ddos_rows_for_model.empty:
-                        global_ddos_rows.append(ddos_rows_for_model)
+                results_df, ddos_rows = predict_ddos(features_df, MODEL_PATH, pod_name)
+                if not ddos_rows.empty:
+                    global_ddos_rows.append(ddos_rows)
 
-                    if 'prediction' in results_df.columns:
-                        ddos_detected = results_df[results_df['prediction'] == 1]
-                        if not ddos_detected.empty:
-                            logging.warning(f"[{pod_name}] DDoS attack detected:")
-                            logging.warning(ddos_detected[['timestamp','total_requests','prediction']].to_string(index=False))
-                        else:
-                            logging.info(f"[{pod_name}] No DDoS attack detected.")
+                if "prediction" in results_df.columns:
+                    ddos_hits = results_df[results_df["prediction"] == 1]
+                    if not ddos_hits.empty:
+                        logging.warning(f"[{pod_name}] 🚨 DDoS detected:")
+                        logging.warning(
+                            ddos_hits[["timestamp", "total_requests", "prediction"]]
+                            .to_string(index=False)
+                        )
                     else:
-                        logging.warning(f"[{pod_name}] 'prediction' column missing, skipping.")
+                        logging.info(f"[{pod_name}] No DDoS attack detected.")
+                else:
+                    logging.warning(f"[{pod_name}] Missing 'prediction' column.")
 
                 logging.info(f"[{pod_name}] DDoS detection cycle completed\n")
 
+            # ── LIME + upload one consolidated report ────────────────────
             explain_all_ddos_rows(global_ddos_rows, MODEL_PATH, RECEIVER_URL)
 
         except Exception as e:
             logging.exception(f"Main loop error: {e}")
 
-        time.sleep(60)
+        time.sleep(60)   # 1-minute cadence
+
 
 if __name__ == '__main__':
     main()
